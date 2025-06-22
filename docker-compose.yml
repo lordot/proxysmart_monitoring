@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  delta:
+    image: lordot/pm-delta:latest
+    container_name: pm-delta
+    volumes:
+      - ./servers.yaml:/config/servers.yaml:ro
+      - ./delta/logs:/logs
+      - ./delta/state:/state
+
+  ping:
+    image: lordot/pm-ping:latest
+    container_name: pm-ping
+    volumes:
+      - ./servers.yaml:/config/servers.yaml:ro
+      - ./ping/logs:/logs
+
+  collector:
+    image: lordot/pm-collector:latest
+    container_name: pm-collector
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # путь до конфигурации
+      CONFIG_PATH: /config/servers.yaml
+      # подключение к БД (роль только на запись)
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: metrics
+      PGUSER: metrics_ingest
+      PGPASSWORD: ingest_pass
+      RUN_EVERY_SECONDS: "3600"
+      # LOG_LEVEL: INFO
+    volumes:
+      - ./servers.yaml:/config/servers.yaml:ro
+    restart: unless-stopped
+
+  db:
+    image: timescale/timescaledb:latest-pg15
+    container_name: tsdb
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app_pass
+      POSTGRES_DB: metrics
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U app -d metrics" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Храним служебную БД Metabase во внешнем Postgres
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_HOST: db
+      MB_DB_USER: metabase_app        # было: app
+      MB_DB_PASS: metabase_app_pass   # было: app_pass
+      # Часовой пояс отчётов (как у тебя было)
+      MB_REPORT_TIMEZONE: Europe/Helsinki
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  db_data:

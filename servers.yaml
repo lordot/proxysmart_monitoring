@@ -1,0 +1,26 @@
+defaults:
+  telegram_bot_token: "123456:ABCDEF_yourBotToken"
+  telegram_chat_id: "-4850356170"
+  timeout_seconds: 5
+  verify_ssl: true
+  scheme: http                     # http|https (по умолчанию http)
+  path: /apix/show_status_json     # путь по умолчанию
+
+servers:
+  - id: "hel1"
+    name: "proxy-hel1"
+    host: "10.0.0.11"
+    port: 8080
+    auth_user: "admin"
+    auth_pass: "secret"
+    # telegram_chat_id: "-100123456"     # (необяз.) свой чат
+    # telegram_bot_token: "..."          # (необяз.) свой токен (обычно не нужно)
+
+  - id: "spb1"
+    name: "proxy-spb1"
+    host: "spb.example.com"
+    port: 443
+    scheme: https
+    auth_user: "api"
+    auth_pass: "pa55w0rd"
+    # verify_ssl: false                  # если self-signed
