@@ -4,15 +4,14 @@ set -euo pipefail
 REPO_URL="https://github.com/lordot/proxysmart_monitoring"
 WORKDIR="$(mktemp -d -t proxysmart-XXXXXXXX)"
 INSTALL_DIR="/usr/local/bin"
-CRON_DIR="/etc/cron.d"
-CRON_FILE="${CRON_DIR}/proxysmart_monitoring"
+STATE_DIR="/var/lib/proxysmart"
+LOG_DIR="/var/log"
 VARS=(MG_USER MG_PASSWORD MG_TG_TOKEN MG_TG_CHAT)
 
+trap 'rm -rf "$WORKDIR"' EXIT
+
 require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    echo "Запустите скрипт с правами root (sudo)." >&2
-    exit 1
-  fi
+  [[ $EUID -eq 0 ]] || { echo "Запустите скрипт с sudo/root."; exit 1; }
 }
 
 pkg_install() {
@@ -21,16 +20,46 @@ pkg_install() {
     python3 python3-pip git cron ca-certificates
 }
 
-have_line_in_file() {
-  local key="$1" file="$2"
-  grep -q -E "^${key}=" "$file" 2>/dev/null || return 1
+# --- Чтение значений (env -> /dev/tty) ---
+read_var_value() {
+  local var="$1"
+  # 1) из окружения процесса?
+  if [[ -n "${!var-}" ]]; then
+    printf '%s' "${!var}"
+    return 0
+  fi
+  # 2) спросим через /dev/tty
+  if [[ -e /dev/tty && -r /dev/tty ]]; then
+    local val=""
+    while :; do
+      case "$var" in
+        MG_PASSWORD|MG_TG_TOKEN)
+          printf "%s " "${var} не задан. Введите значение:" > /dev/tty
+          stty -F /dev/tty -echo 2>/dev/null || true
+          IFS= read -r val < /dev/tty || val=""
+          stty -F /dev/tty echo 2>/dev/null || true
+          echo > /dev/tty
+          ;;
+        *)
+          printf "%s " "${var} не задан. Введите значение:" > /dev/tty
+          IFS= read -r val < /dev/tty || val=""
+          ;;
+      esac
+      [[ -n "$val" ]] && break
+      echo "Значение не может быть пустым." > /dev/tty
+    done
+    printf '%s' "$val"
+    return 0
+  fi
+  echo "[ERR] ${var} не задан и нет TTY. Запустите так:" >&2
+  echo "  sudo env MG_USER=... MG_PASSWORD=... MG_TG_TOKEN=... MG_TG_CHAT=... ./install.sh" >&2
+  exit 1
 }
 
-escape_env_value() {
+escape_for_env() {
   python3 - <<'PY'
 import sys
-v=sys.stdin.read()
-v=v.replace("\\","\\\\").replace('"','\\"').rstrip("\n")
+v=sys.stdin.read().rstrip("\n").replace("\\","\\\\").replace('"','\\"')
 print(v,end="")
 PY
 }
@@ -39,29 +68,33 @@ ensure_env_permanent() {
   touch /etc/environment
   chmod 0644 /etc/environment
 
-  for var in "${VARS[@]}"; do
-    if have_line_in_file "$var" /etc/environment; then
-      echo "[env] ${var} уже задан в /etc/environment — пропускаю."
-      val="$(grep -E "^${var}=" /etc/environment | head -n1 | sed -E 's/^[^=]+=//; s/^"//; s/"$//')"
-      export "${var}=${val}"
-      continue
-    fi
+  # собираем гарантированно НЕпустые значения
+  declare -A VAL=()
+  for v in "${VARS[@]}"; do
+    VAL["$v"]="$(read_var_value "$v")"
+  done
 
-    if [[ -n "${!var-}" ]]; then
-      echo "[env] Использую текущую переменную ${var} из окружения."
-      val="${!var}"
-    else
-      prompt="${var} не задан. Введите значение:"
-      case "$var" in
-        MG_PASSWORD|MG_TG_TOKEN) read -rsp "$prompt " val; echo ;;
-        *)                        read -rp  "$prompt " val ;;
-      esac
-    fi
+  # создаём новый файл из старого, вырезая прежние MG_* строки
+  local tmp="$(mktemp)"
+  # сохраняем все строки, КРОМЕ MG_*
+  grep -vE '^(MG_USER|MG_PASSWORD|MG_TG_TOKEN|MG_TG_CHAT)=' /etc/environment 2>/dev/null > "$tmp" || true
 
-    esc_val="$(printf "%s" "$val" | escape_env_value)"
-    echo "${var}=\"${esc_val}\"" >> /etc/environment
-    export "${var}=${val}"
-    echo "[env] Записал ${var} в /etc/environment"
+  # добавляем наши MG_* строки
+  for v in "${VARS[@]}"; do
+    esc="$(printf '%s' "${VAL[$v]}" | escape_for_env)"
+    printf '%s="%s"\n' "$v" "$esc" >> "$tmp"
+    export "$v=${VAL[$v]}"
+    echo "[env] $v=${VAL[$v]}"
+  done
+
+  # бэкап и атомарная замена
+  cp /etc/environment "/etc/environment.bak.$(date +%F_%H-%M-%S)" 2>/dev/null || true
+  install -m 0644 -o root -g root "$tmp" /etc/environment
+  rm -f "$tmp"
+
+  # вернём значения наружу
+  for v in "${VARS[@]}"; do
+    printf -v "$v" '%s' "${VAL[$v]}"
   done
 }
 
@@ -71,31 +104,30 @@ clone_repo() {
 }
 
 install_requirements() {
-  local req="$WORKDIR/repo/requirements.txt"
-  if [[ -f "$req" ]]; then
-    echo "[pip] Устанавливаю зависимости из requirements.txt (системно)"
-    BSP_FLAG=""
-    if python3 - <<'PY'
-import sys, subprocess
-try:
-    out = subprocess.check_output([sys.executable, "-m", "pip", "help", "install"], text=True)
-    print("--break-system-packages" if "--break-system-packages" in out else "")
-except Exception:
-    pass
-PY
-    then
-      BSP_FLAG="--break-system-packages"
-    fi
-    python3 -m pip install -r "$req" $BSP_FLAG
+  local req=""
+  for cand in requirements.txt requeriments.txt requiremetns.txt; do
+    [[ -f "$WORKDIR/repo/$cand" ]] && { req="$WORKDIR/repo/$cand"; break; }
+  done
+  if [[ -n "$req" ]]; then
+    echo "[pip] Устанавливаю зависимости из $(basename "$req")"
+    local BSP=""
+    python3 -m pip help install 2>/dev/null | grep -q -- '--break-system-packages' && BSP="--break-system-packages"
+    python3 -m pip install -r "$req" $BSP
   else
-    echo "[pip] requirements.txt не найден — пропускаю."
+    echo "[pip] requirements(.txt) не найден — пропускаю."
   fi
+}
+
+prep_fs() {
+  mkdir -p "$STATE_DIR"
+  chmod 0755 "$STATE_DIR"
+  touch "$LOG_DIR/proxysmart_modems_list.log" "$LOG_DIR/proxysmart_modems_check.log"
+  chmod 0644 "$LOG_DIR/proxysmart_modems_list.log" "$LOG_DIR/proxysmart_modems_check.log"
 }
 
 copy_scripts() {
   shopt -s nullglob
   for f in "$WORKDIR"/repo/*.py; do
-    # добавим shebang, если его нет (чтобы можно было вызывать как исполняемый файл)
     if ! head -n1 "$f" | grep -qE '^#!'; then
       echo "[bin] Добавляю shebang в $(basename "$f")"
       tmpf="$(mktemp)"
@@ -113,7 +145,7 @@ install_cron() {
   local END="### PROXYSMART-END"
   local TMP="$(mktemp)"
 
-  # Текущий crontab без нашего блока
+  # Текущий crontab root без нашего блока
   crontab -u root -l 2>/dev/null \
     | awk -v b="$BEGIN" -v e="$END" '
         $0==b {inb=1; next}
@@ -121,10 +153,24 @@ install_cron() {
         !inb {print}
       ' > "$TMP" || true
 
-  # Добавляем новый блок
   {
     echo "$BEGIN"
-    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$repo_cron"
+    echo "# Env для задач ниже:"
+    # важно: пишем ИЗ УЖЕ СОБРАННЫХ значений (а не перечитываем файл)
+    for v in "${VARS[@]}"; do
+      printf '%s="%s"\n' "$v" "${!v}"
+    done
+    echo
+    echo 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+    echo 'SHELL=/bin/bash'
+    echo
+    if [[ -f "$repo_cron" ]]; then
+      sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$repo_cron"
+    else
+      # дефолт, если файла crontab нет в репо
+      echo '*/20 * * * * python3 /usr/local/bin/proxysmart_modems_check.py >> /var/log/proxysmart_modems_check.log 2>&1'
+      echo '*/15 * * * * python3 /usr/local/bin/proxysmart_modems_list.py  >> /var/log/proxysmart_modems_list.log  2>&1'
+    fi
     echo "$END"
   } >> "$TMP"
 
@@ -133,22 +179,18 @@ install_cron() {
   echo "[cron] Блок PROXYSMART обновлён"
 }
 
-
-cleanup() { rm -rf "$WORKDIR"; }
-
 main() {
   require_root
   pkg_install
   ensure_env_permanent
   clone_repo
   install_requirements
+  prep_fs
   copy_scripts
   install_cron
-  cleanup
   echo "Готово ✅"
-  echo "Cron-файл:   ${CRON_FILE}"
-  echo "Скрипты:     ${INSTALL_DIR}/*.py (исполняемые)"
-  echo "Переменные:  /etc/environment (для новых сессий)."
+  echo "Проверь значения:  grep -E '^(MG_USER|MG_PASSWORD|MG_TG_TOKEN|MG_TG_CHAT)=' /etc/environment"
+  echo "Проверь cron:      sudo crontab -l | sed -n '/PROXYSMART-BEGIN/,/PROXYSMART-END/p'"
 }
 
 main "$@"

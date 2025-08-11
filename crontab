@@ -1,4 +1,4 @@
 ### PROXYSMART-BEGIN
 */20 * * * * python3 /usr/local/bin/proxysmart_modems_check.py >> /var/log/proxysmart_modems_check.log 2>&1
-*/15 * * * * python3 /usr/local/bin/proxysmart_modems_list.py  >> /var/log/proxysmart_modems_list.log  2>&1
+*/10 * * * * python3 /usr/local/bin/proxysmart_modems_list.py  >> /var/log/proxysmart_modems_list.log  2>&1
 ### PROXYSMART-END
