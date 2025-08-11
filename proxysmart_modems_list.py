@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 import os
+import platform
+import socket
+import subprocess
 import time
 import logging
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional
+
 import requests
 
 # ──────────── НАСТРОЙКИ ────────────
-AUTH = ('proxy', 'proxy')
-TELEGRAM_BOT_TOKEN = 'TOKEN'
-TELEGRAM_CHAT_ID = 'CHAT_ID'
+from requests.auth import HTTPBasicAuth
+
+AUTH_USER = os.getenv("MG_USER")
+AUTH_PASS = os.getenv("MG_PASSWORD", "")
+TELEGRAM_BOT_TOKEN = os.getenv("MG_TG_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("MG_TG_CHAT", "-4850356170")
 API_URL = 'http://localhost:8080/apix/show_status_json'
 CHECK_INTERVAL = 60  # сек
 LOG_FILE = '/var/log/proxysmart_modems_list.log'
@@ -27,13 +36,74 @@ handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(handler)
 
+
+# ──────────── УТИЛИТЫ ────────────
+def build_auth() -> Optional[HTTPBasicAuth]:
+    """
+    Возвращает HTTPBasicAuth, если задан MG_USER.
+    Если логин не задан — возвращает None (без авторизации).
+    """
+    if AUTH_USER is None:
+        return None
+    return HTTPBasicAuth(AUTH_USER, AUTH_PASS)
+
+
+def get_hostname() -> str:
+    """
+    Возвращает максимально надёжное имя хоста.
+    Порядок шагов подобран от самых быстрых к самым «тяжёлым».
+    Если всё неудачно — 'localhost'.
+    """
+
+    # 1. socket.gethostname() — прямой системный вызов
+    try:
+        hn = socket.gethostname()
+        if hn:
+            return hn
+    except Exception:
+        pass
+
+    # 2. platform.node() — обёртка вокруг того же системного вызова,
+    #    но существует давно и иногда работает там, где первый поймал OSError
+    try:
+        hn = platform.node()
+        if hn:
+            return hn
+    except Exception:
+        pass
+
+    # 3. Переменная окружения HOSTNAME (как раньше)
+    hn = os.environ.get("HOSTNAME")
+    if hn:
+        return hn
+
+    # 4. Linux/Unix: читаем /etc/hostname
+    try:
+        hn = Path("/etc/hostname").read_text().strip()
+        if hn:
+            return hn
+    except FileNotFoundError:
+        pass
+
+    # 5. Последний шанс — вызываем утилиту hostname
+    try:
+        hn = subprocess.check_output(["hostname"], text=True).strip()
+        if hn:
+            return hn
+    except Exception:
+        pass
+
+    # 6. Совсем ничего не нашли
+    return "localhost"
+
+
 # ──────────── ЛОГИКА ────────────
 last_count: int | None = None
 
 
 def fetch_modem_list():
     try:
-        resp = requests.get(API_URL, auth=AUTH, timeout=5)
+        resp = requests.get(API_URL, auth=build_auth(), timeout=5)
         if resp.status_code == 200:
             return resp.json()
         logger.error("[API error] Status code: %s", resp.status_code)
@@ -91,7 +161,7 @@ def check_and_notify() -> None:
         return
 
     if after_wait != last_count:
-        hostname = os.environ.get("HOSTNAME", "localhost")
+        hostname = get_hostname()
         delta = after_wait - last_count
         action = "добавлены" if delta > 0 else "удалены"
 
