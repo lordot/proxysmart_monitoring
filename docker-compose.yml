@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  modems_list:
+    image: lordot/pm-delta:latest
+    container_name: pm-delta
+    volumes:
+      - ./servers.yaml:/config/servers.yaml:ro
+      - ./delta/logs:/logs
+      - ./delta/state:/state
+
+  modems_check:
+    image: lordot/pm-ping:latest
+    container_name: pm-ping
+    volumes:
+      - ./servers.yaml:/config/servers.yaml:ro
