@@ -1,5 +1,5 @@
 defaults:
-  telegram_bot_token: "123456:ABCDEF_yourBotToken"
+  telegram_bot_token: "7365017198:AAHiPKd8IaSduguZNLbVVfxs8_UBfPiWmdU"
   telegram_chat_id: "-4850356170"
   timeout_seconds: 5
   verify_ssl: true
@@ -7,20 +7,44 @@ defaults:
   path: /apix/show_status_json     # путь по умолчанию
 
 servers:
-  - id: "hel1"
-    name: "proxy-hel1"
-    host: "10.0.0.11"
-    port: 8080
-    auth_user: "admin"
-    auth_pass: "secret"
-    # telegram_chat_id: "-100123456"     # (необяз.) свой чат
-    # telegram_bot_token: "..."          # (необяз.) свой токен (обычно не нужно)
+  - id: "gc4"
+    name: "gc4"
+    host: "74.208.13.205"
+    port: 7002
+    auth_user: "proxy"
+    auth_pass: "822edbfb2acc"
 
-  - id: "spb1"
-    name: "proxy-spb1"
-    host: "spb.example.com"
-    port: 443
-    scheme: https
-    auth_user: "api"
-    auth_pass: "pa55w0rd"
-    # verify_ssl: false                  # если self-signed
+  - id: "gc1"
+    name: "gc1"
+    host: "74.208.184.198"
+    port: 7001
+    auth_user: "proxy"
+    auth_pass: "k0NKf0bjpIZ0"
+
+  - id: "gc2"
+    name: "gc2"
+    host: "74.208.13.205"
+    port: 7001
+    auth_user: "proxy"
+    auth_pass: "opczsTul98lcAckaJLOJ"
+
+  - id: "gc3"
+    name: "gc3"
+    host: "66.179.81.210"
+    port: 7001
+    auth_user: "proxy"
+    auth_pass: "ebd8b3675ee8"
+
+  - id: "c85"
+    name: "c85"
+    host: "5.161.81.244"
+    port: 7985
+    auth_user: "proxy"
+    auth_pass: "proxy39585373"
+
+  - id: "catarsan2"
+    name: "catarsan2"
+    host: "74.208.13.205"
+    port: 7003
+    auth_user: "proxy"
+    auth_pass: "be06e07c6e4f"
