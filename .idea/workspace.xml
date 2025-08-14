@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="76d77963-623d-4b1b-aeb4-b509530f90e2" name="Changes" comment="">
+
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/delta/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/delta/requirements.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/ping/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/ping/app.py" afterDir="false" />
@@ -42,13 +43,13 @@
     "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.stylelint": ""
   },
-  "keyToStringList": {
-    "com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File": [
-      "yaml",
-      "Python"
+  &quot;keyToStringList&quot;: {
+    &quot;com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File&quot;: [
+      &quot;yaml&quot;,
+      &quot;Python&quot;
     ]
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="C:\dev\proxysmart_monitoring\ping\config" />
@@ -233,6 +234,7 @@
       <workItem from="1754481708123" duration="1297000" />
       <workItem from="1754548878927" duration="7000" />
       <workItem from="1754904289833" duration="10048000" />
+      <workItem from="1755002365770" duration="1003000" />
     </task>
     <servers />
   </component>
