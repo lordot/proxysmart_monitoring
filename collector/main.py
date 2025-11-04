@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
-import sys
 import time
-import json
 import logging
 import re
 from decimal import Decimal
@@ -17,7 +15,6 @@ from requests.auth import HTTPBasicAuth
 import psycopg
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/config/servers.yaml")
-
 LIST_PORTS_PATH = "/apix/list_ports_json"
 BANDWIDTH_PATH = "/apix/bandwidth_report_json"  # ?arg=<portID>
 
@@ -29,13 +26,7 @@ logging.basicConfig(
 log = logging.getLogger("collector")
 
 # ——— разбор "19.6 GB" -> bytes ———
-_MULT = {
-    "B": 1,
-    "KB": 1000,
-    "MB": 1000 ** 2,
-    "GB": 1000 ** 3,
-    "TB": 1000 ** 4,
-}
+_MULT = {"B": 1, "KB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3, "TB": 1000 ** 4}
 _RX = re.compile(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([KMGTP]?B)\s*$", re.IGNORECASE)
 
 
@@ -44,7 +35,6 @@ def parse_bytes(s: str) -> int:
         return 0
     m = _RX.match(s.strip())
     if not m:
-        # иногда может прийти просто число байт без суффикса
         try:
             return int(s)
         except Exception:
@@ -55,11 +45,10 @@ def parse_bytes(s: str) -> int:
     return int(num * _MULT.get(unit, 1))
 
 
-# ——— загрузка конфигурации ———
+# ——— конфиг ———
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    cfg = cfg or {}
+        cfg = yaml.safe_load(f) or {}
     cfg.setdefault("defaults", {})
     cfg.setdefault("servers", [])
     return cfg
@@ -68,11 +57,10 @@ def load_config(path: str) -> Dict[str, Any]:
 def merged(server: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(defaults)
     out.update(server or {})
-    # нормализуем типы
     out["timeout_seconds"] = int(out.get("timeout_seconds", 5))
     out["verify_ssl"] = bool(out.get("verify_ssl", True))
     out["scheme"] = out.get("scheme", "http")
-    out["path"] = out.get("path", "/apix/show_status_json")  # не используется, оставим на будущее
+    out["path"] = out.get("path", "/apix/show_status_json")
     return out
 
 
@@ -80,7 +68,7 @@ def base_url(item: Dict[str, Any]) -> str:
     return f"{item['scheme']}://{item['host']}:{item['port']}"
 
 
-# ——— сетевые вызовы ———
+# ——— HTTP ———
 def fetch_ports(item: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     url = base_url(item) + LIST_PORTS_PATH
     auth = HTTPBasicAuth(item["auth_user"], item["auth_pass"])
@@ -103,22 +91,24 @@ def db_connect_from_env():
     dsn = os.getenv("DATABASE_URL")
     if dsn:
         return psycopg.connect(dsn, autocommit=True)
-    # PG* переменные
-    host = os.getenv("PGHOST", "db")
-    port = int(os.getenv("PGPORT", "5432"))
-    db = os.getenv("PGDATABASE", "metrics")
-    user = os.getenv("PGUSER", "metrics_ingest")
-    pwd = os.getenv("PGPASSWORD", "")
-    return psycopg.connect(host=host, port=port, dbname=db, user=user, password=pwd, autocommit=True)
+    return psycopg.connect(
+        host=os.getenv("PGHOST", "db"),
+        port=int(os.getenv("PGPORT", "5432")),
+        dbname=os.getenv("PGDATABASE", "metrics"),
+        user=os.getenv("PGUSER", "metrics_ingest"),
+        password=os.getenv("PGPASSWORD", ""),
+        autocommit=True,
+    )
 
 
 def insert_rows(conn, rows: Iterable[Tuple]):
+    # collected_at опущен — БД проставит DEFAULT now() (UTC-инстант для timestamptz)
     with conn.cursor() as cur:
         cur.executemany(
             """
             INSERT INTO metrics.proxy_bandwidth
-              (collected_at, server_id, server_name, imei, port_id, login, lifetime_in_bytes, lifetime_out_bytes)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+              (server_id, server_name, imei, port_id, login, lifetime_in_bytes, lifetime_out_bytes)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
             """,
             rows
         )
@@ -131,7 +121,6 @@ def collect_once(cfg: Dict[str, Any]) -> int:
 
     inserted = 0
     conn = db_connect_from_env()
-    now = datetime.now(timezone.utc)
 
     for srv in servers:
         item = merged(srv, defaults)
@@ -154,7 +143,7 @@ def collect_once(cfg: Dict[str, Any]) -> int:
                     bw = fetch_bandwidth(item, port_id)
                     in_b = parse_bytes(bw.get("bandwidth_bytes_day_in", ""))
                     out_b = parse_bytes(bw.get("bandwidth_bytes_day_out", ""))
-                    row = (now, sid, sname, str(imei), str(port_id), str(login), in_b, out_b)
+                    row = (sid, sname, str(imei), str(port_id), str(login), in_b, out_b)
                     insert_rows(conn, [row])
                     inserted += 1
                     log.info("OK %s/%s imei=%s port=%s in=%d out=%d",
@@ -169,6 +158,7 @@ def collect_once(cfg: Dict[str, Any]) -> int:
 def main():
     cfg = load_config(CONFIG_PATH)
     every = int(os.getenv("RUN_EVERY_SECONDS", "0"))
+
     if every <= 0:
         n = collect_once(cfg)
         log.info("Завершено, вставлено строк: %d", n)

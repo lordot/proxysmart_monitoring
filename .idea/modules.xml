@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/proxysmart_monitoring.iml" filepath="$PROJECT_DIR$/.idea/proxysmart_monitoring.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/proxysmart.iml" filepath="$PROJECT_DIR$/.idea/proxysmart.iml" />
     </modules>
   </component>
 </project>

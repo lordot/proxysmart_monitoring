@@ -63,14 +63,27 @@ def modem_key(modem: dict) -> Tuple[str, str]:
     return imei, dev
 
 
-def pick_ping(modem: dict) -> str:
-    return modem.get("net_details", {}).get("ping_stats", "") or ""
+# ---- Новая логика: IS_ONLINE ("yes"/"no") ----
+def pick_is_online_value(modem: dict) -> Any:
+    return modem.get("net_details", {}).get("IS_ONLINE", None)
 
 
-def is_ping_dead(ping_stats: Optional[str]) -> bool:
-    if not ping_stats:
+def is_offline(is_online_value: Any) -> bool:
+    """
+    Считаем онлайн только явное 'yes' (без регистра) или булевый True / '1'.
+    Всё остальное — офлайн.
+    """
+    if is_online_value is None:
         return True
-    return "100% loss" in ping_stats
+    # Булевы/числа
+    if isinstance(is_online_value, bool):
+        return not is_online_value
+    if isinstance(is_online_value, (int, float)):
+        return not bool(is_online_value)
+
+    # Строки
+    s = str(is_online_value).strip().lower()
+    return s not in {"yes", "true", "1", "ok", "online"}  # на будущее терпим к «true/1/ok/online»
 
 
 def get_battery_percent(modem: dict) -> Optional[int]:
@@ -110,7 +123,6 @@ def load_config(path: str) -> Dict[str, Any]:
 
 def build_endpoints(srv: dict, defaults: dict) -> Dict[str, Any]:
     """Собирает base_root (scheme://host[:port]) и полный URL статуса."""
-    # Scheme/path/verify/timeout из конфига (с серверными оверрайдами)
     scheme = (srv.get("scheme") or defaults.get("scheme") or "http").lower()
     verify_ssl = bool(srv.get("verify_ssl", defaults.get("verify_ssl", True)))
     timeout_seconds = int(srv.get("timeout_seconds", defaults.get("timeout_seconds", 5)))
@@ -133,12 +145,10 @@ def build_endpoints(srv: dict, defaults: dict) -> Dict[str, Any]:
         status_url = f"{base_root}{status_path}"
         eff_scheme = scheme
 
-    # Auth
     auth_user = srv.get("auth_user")
     auth_pass = srv.get("auth_pass") or ""
     auth = BasicAuth(auth_user, auth_pass) if auth_user else None
 
-    # Telegram (server override -> defaults -> env)
     tg_bot = srv.get("telegram_bot_token") or defaults.get("telegram_bot_token") or ENV_FALLBACK_TG_TOKEN
     tg_chat = srv.get("telegram_chat_id") or defaults.get("telegram_chat_id") or ENV_FALLBACK_TG_CHAT
 
@@ -219,7 +229,7 @@ async def check_modem_alive(session: aiohttp.ClientSession, status_url: str, ime
     try:
         modems = await fetch_status(session, status_url)
         m = index_by_imei(modems).get(imei)
-        return bool(m) and not is_ping_dead(pick_ping(m))
+        return bool(m) and not is_offline(pick_is_online_value(m))
     except Exception:
         return False
 
@@ -302,7 +312,6 @@ async def process_server(
     logger = logging.getLogger(f"proxysmart.{server_id}")
     fh = ensure_file_logger(server_id)
     if fh:
-        # снять старые файловые хендлеры, чтобы не дублировать записи
         for h in list(logger.handlers):
             if isinstance(h, RotatingFileHandler):
                 logger.removeHandler(h)
@@ -310,7 +319,6 @@ async def process_server(
     logger.setLevel(logging.INFO)
 
     timeout = ClientTimeout(total=ep["timeout"])
-    # SSL режим
     ssl_flag = None
     if ep["scheme"] == "https" and not ep["verify_ssl"]:
         ssl_flag = False
@@ -327,18 +335,20 @@ async def process_server(
         # батареи
         await check_battery_levels(session, modems, server_name, ep["tg_bot"], ep["tg_chat"], battery_threshold, logger)
 
-        # мёртвые по ping
+        # офлайн по IS_ONLINE
         dead: List[Tuple[str, str]] = []
         for m in modems:
             imei, dev = modem_key(m)
-            if imei and is_ping_dead(pick_ping(m)):
+            if not imei:
+                continue
+            if is_offline(pick_is_online_value(m)):
                 dead.append((imei, dev))
 
         if not dead:
-            logger.info("[%s] ✅ Все модемы в порядке (нет 100%% loss)", server_id)
+            logger.info("[%s] ✅ Все модемы в порядке (IS_ONLINE = yes)", server_id)
             return
 
-        start_msg_lines = [f"[{server_name}] Найдено модемов с 100% loss: {len(dead)}"] + \
+        start_msg_lines = [f"[{server_name}] Найдено офлайн-модемов (IS_ONLINE != yes): {len(dead)}"] + \
                           [f"— {dev} (IMEI {imei})" for imei, dev in dead]
         start_msg = "\n".join(start_msg_lines)
         await tg_send(session, ep["tg_bot"], ep["tg_chat"], start_msg, logger)
@@ -368,7 +378,7 @@ async def process_server(
 # ---------- CLI ----------
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Мультисерверный мониторинг/восстановление модемов по ping_stats + уведомления в Telegram."
+        description="Мультисерверный мониторинг/восстановление модемов по net_details.IS_ONLINE + уведомления в Telegram."
     )
     p.add_argument("--battery-threshold", type=int, default=int(os.getenv("MG_BATTERY_THRESHOLD", "40")),
                    help="Порог уведомления по батарее, % (по умолчанию 40)")

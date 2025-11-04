@@ -17,15 +17,13 @@ services:
       - ./ping/logs:/logs
 
   collector:
-    image: lordot/pm-collector:latest
+    image: lordot/pm-collector:1.5
     container_name: pm-collector
     depends_on:
       db:
         condition: service_healthy
     environment:
-      # путь до конфигурации
       CONFIG_PATH: /config/servers.yaml
-      # подключение к БД (роль только на запись)
       PGHOST: db
       PGPORT: "5432"
       PGDATABASE: metrics
@@ -71,7 +69,7 @@ services:
       MB_DB_USER: metabase_app        # было: app
       MB_DB_PASS: metabase_app_pass   # было: app_pass
       # Часовой пояс отчётов (как у тебя было)
-      MB_REPORT_TIMEZONE: Europe/Helsinki
+      MB_REPORT_TIMEZONE: America/New_York
     ports:
       - "3000:3000"
     restart: unless-stopped
