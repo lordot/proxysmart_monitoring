@@ -23,6 +23,7 @@ USB_RESET_PATH = "/apix/usb_reset_modem_json"
 # ---------- Глобальные настройки ----------
 CONFIG_PATH = os.getenv("MG_CONFIG", "/config/servers.yaml")
 LOG_DIR = os.getenv("MG_LOG_DIR", "/logs")
+DOUBLECHECK_SECONDS = int(os.getenv("MG_DOUBLECHECK_SECONDS", "120"))
 
 # ENV-фоллбэки для Telegram
 ENV_FALLBACK_TG_TOKEN = os.getenv("MG_TG_TOKEN", "")
@@ -304,6 +305,7 @@ async def process_server(
         defaults: dict,
         battery_threshold: int,
         wait_seconds: int,
+        doublecheck_seconds: int,  # <─ НОВОЕ
 ):
     ep = build_endpoints(srv, defaults)
     server_id = ep["server_id"]
@@ -332,24 +334,49 @@ async def process_server(
             logger.error("[%s] не удалось получить список модемов: %s", server_id, e)
             return
 
-        # батареи
+        # батареи — оставляем как было
         await check_battery_levels(session, modems, server_name, ep["tg_bot"], ep["tg_chat"], battery_threshold, logger)
 
-        # офлайн по IS_ONLINE
-        dead: List[Tuple[str, str]] = []
+        # ---- ДВОЙНАЯ ПРОВЕРКА IS_ONLINE ----
+        dead1: List[Tuple[str, str]] = []
         for m in modems:
             imei, dev = modem_key(m)
             if not imei:
                 continue
             if is_offline(pick_is_online_value(m)):
-                dead.append((imei, dev))
+                dead1.append((imei, dev))
 
-        if not dead:
+        if not dead1:
             logger.info("[%s] ✅ Все модемы в порядке (IS_ONLINE = yes)", server_id)
             return
 
-        start_msg_lines = [f"[{server_name}] Найдено офлайн-модемов (IS_ONLINE != yes): {len(dead)}"] + \
-                          [f"— {dev} (IMEI {imei})" for imei, dev in dead]
+        # НЕ отправляем в Telegram; просто ждём и перепроверяем
+        logger.info("[%s] найдено офлайн-модемов: %d — подождём %d c для повторной проверки",
+                    server_id, len(dead1), doublecheck_seconds)
+        await asyncio.sleep(doublecheck_seconds)
+
+        # повторная проверка
+        try:
+            modems2 = await fetch_status(session, ep["status_url"])
+        except Exception as e:
+            logger.error("[%s] ошибка при повторной проверке статуса: %s", server_id, e)
+            return
+
+        idx2 = index_by_imei(modems2)
+        # оставляем только те, что были офлайн и остались офлайн
+        dead2: List[Tuple[str, str]] = []
+        for imei, dev in dead1:
+            m2 = idx2.get(imei)
+            if m2 is None or is_offline(pick_is_online_value(m2)):
+                dead2.append((imei, dev))
+
+        if not dead2:
+            logger.info("[%s] ⚠️ после повторной проверки модемы восстановились — ничего не делаем", server_id)
+            return
+
+        # теперь можно уведомить и запускать восстановление
+        start_msg_lines = [f"[{server_name}] Найдено офлайн-модемов (подтверждено): {len(dead2)}"] + \
+                          [f"— {dev} (IMEI {imei})" for imei, dev in dead2]
         start_msg = "\n".join(start_msg_lines)
         await tg_send(session, ep["tg_bot"], ep["tg_chat"], start_msg, logger)
         logger.warning(start_msg)
@@ -369,7 +396,7 @@ async def process_server(
                     logger=logger,
                 )
             )
-            for imei, dev in dead
+            for imei, dev in dead2
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("[%s] завершено", server_id)
@@ -384,6 +411,9 @@ def parse_args():
                    help="Порог уведомления по батарее, % (по умолчанию 40)")
     p.add_argument("--wait-seconds", type=int, default=int(os.getenv("MG_WAIT_SECONDS", "180")),
                    help="Пауза после каждого действия, сек (по умолчанию 180)")
+    p.add_argument("--doublecheck-seconds", type=int,
+                   default=DOUBLECHECK_SECONDS,
+                   help="Задержка перед повторной проверкой офлайна, сек (по умолчанию 120)")
     return p.parse_args()
 
 
@@ -401,6 +431,7 @@ async def main_async():
                 defaults=defaults,
                 battery_threshold=args.battery_threshold,
                 wait_seconds=args.wait_seconds,
+                doublecheck_seconds=getattr(args, "doublecheck_seconds", DOUBLECHECK_SECONDS),
             )
         )
         for srv in servers
