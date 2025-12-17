@@ -64,27 +64,43 @@ def modem_key(modem: dict) -> Tuple[str, str]:
     return imei, dev
 
 
-# ---- Новая логика: IS_ONLINE ("yes"/"no") ----
-def pick_is_online_value(modem: dict) -> Any:
-    return modem.get("net_details", {}).get("IS_ONLINE", None)
-
-
-def is_offline(is_online_value: Any) -> bool:
+# ---- Обновленная логика проверки статуса ----
+def is_offline(modem: dict) -> bool:
     """
-    Считаем онлайн только явное 'yes' (без регистра) или булевый True / '1'.
-    Всё остальное — офлайн.
+    Считаем, что модем требует восстановления (офлайн), если:
+    1. IS_ONLINE != 'yes'
+    2. При этом он НЕ занят (LOCKED, REBOOTING, ROTATED все false).
     """
-    if is_online_value is None:
-        return True
-    # Булевы/числа
-    if isinstance(is_online_value, bool):
-        return not is_online_value
-    if isinstance(is_online_value, (int, float)):
-        return not bool(is_online_value)
+    net_details = modem.get("net_details", {})
 
-    # Строки
-    s = str(is_online_value).strip().lower()
-    return s not in {"yes", "true", "1", "ok", "online"}  # на будущее терпим к «true/1/ok/online»
+    # Проверяем основной статус сети
+    is_online_val = net_details.get("IS_ONLINE", "no")
+
+    # Считаем онлайн, если явно 'yes', 'true', '1' и т.д.
+    online_status = False
+    if isinstance(is_online_val, bool):
+        online_status = is_online_val
+    elif isinstance(is_online_val, (int, float)):
+        online_status = bool(is_online_val)
+    else:
+        s = str(is_online_val).strip().lower()
+        online_status = s in {"yes", "true", "1", "ok", "online"}
+
+    # Если модем онлайн — всё отлично
+    if online_status:
+        return False
+
+    # Если модем офлайн, проверяем системные флаги (приходят как строки "true"/"false")
+    # Если модем заблокирован, перезагружается или ротируется — мы его не трогаем (не считаем "мертвым")
+    is_locked = str(modem.get("IS_LOCKED", "false")).lower() == "true"
+    is_rebooting = str(modem.get("IS_REBOOTING", "false")).lower() == "true"
+    is_rotated = str(modem.get("IS_ROTATED", "false")).lower() == "true"
+
+    if is_locked or is_rebooting or is_rotated:
+        return False
+
+    # Если он офлайн и при этом ничего из вышеперечисленного не делает — значит он завис
+    return True
 
 
 def get_battery_percent(modem: dict) -> Optional[int]:
@@ -123,7 +139,6 @@ def load_config(path: str) -> Dict[str, Any]:
 
 
 def build_endpoints(srv: dict, defaults: dict) -> Dict[str, Any]:
-    """Собирает base_root (scheme://host[:port]) и полный URL статуса."""
     scheme = (srv.get("scheme") or defaults.get("scheme") or "http").lower()
     verify_ssl = bool(srv.get("verify_ssl", defaults.get("verify_ssl", True)))
     timeout_seconds = int(srv.get("timeout_seconds", defaults.get("timeout_seconds", 5)))
@@ -230,7 +245,7 @@ async def check_modem_alive(session: aiohttp.ClientSession, status_url: str, ime
     try:
         modems = await fetch_status(session, status_url)
         m = index_by_imei(modems).get(imei)
-        return bool(m) and not is_offline(pick_is_online_value(m))
+        return bool(m) and not is_offline(m)  # Используем обновленную функцию
     except Exception:
         return False
 
@@ -305,7 +320,7 @@ async def process_server(
         defaults: dict,
         battery_threshold: int,
         wait_seconds: int,
-        doublecheck_seconds: int,  # <─ НОВОЕ
+        doublecheck_seconds: int,
 ):
     ep = build_endpoints(srv, defaults)
     server_id = ep["server_id"]
@@ -334,28 +349,27 @@ async def process_server(
             logger.error("[%s] не удалось получить список модемов: %s", server_id, e)
             return
 
-        # батареи — оставляем как было
         await check_battery_levels(session, modems, server_name, ep["tg_bot"], ep["tg_chat"], battery_threshold, logger)
 
-        # ---- ДВОЙНАЯ ПРОВЕРКА IS_ONLINE ----
+        # ---- ДВОЙНАЯ ПРОВЕРКА СОСТОЯНИЯ (ONLINE + SYSTEM FLAGS) ----
         dead1: List[Tuple[str, str]] = []
         for m in modems:
             imei, dev = modem_key(m)
             if not imei:
                 continue
-            if is_offline(pick_is_online_value(m)):
+            # Здесь вызываем обновленную функцию, передавая весь словарь модема
+            if is_offline(m):
                 dead1.append((imei, dev))
 
         if not dead1:
-            logger.info("[%s] ✅ Все модемы в порядке (IS_ONLINE = yes)", server_id)
+            logger.info("[%s] ✅ Все модемы в порядке или заняты системными процессами", server_id)
             return
 
-        # НЕ отправляем в Telegram; просто ждём и перепроверяем
-        logger.info("[%s] найдено офлайн-модемов: %d — подождём %d c для повторной проверки",
+        logger.info("[%s] найдено проблемных модемов: %d — подождём %d c для повторной проверки",
                     server_id, len(dead1), doublecheck_seconds)
         await asyncio.sleep(doublecheck_seconds)
 
-        # повторная проверка
+        # Повторная проверка
         try:
             modems2 = await fetch_status(session, ep["status_url"])
         except Exception as e:
@@ -363,18 +377,17 @@ async def process_server(
             return
 
         idx2 = index_by_imei(modems2)
-        # оставляем только те, что были офлайн и остались офлайн
         dead2: List[Tuple[str, str]] = []
         for imei, dev in dead1:
             m2 = idx2.get(imei)
-            if m2 is None or is_offline(pick_is_online_value(m2)):
+            # Если модем исчез из списка или всё еще офлайн по нашей логике
+            if m2 is None or is_offline(m2):
                 dead2.append((imei, dev))
 
         if not dead2:
             logger.info("[%s] ⚠️ после повторной проверки модемы восстановились — ничего не делаем", server_id)
             return
 
-        # теперь можно уведомить и запускать восстановление
         start_msg_lines = [f"[{server_name}] Найдено офлайн-модемов (подтверждено): {len(dead2)}"] + \
                           [f"— {dev} (IMEI {imei})" for imei, dev in dead2]
         start_msg = "\n".join(start_msg_lines)
@@ -405,7 +418,7 @@ async def process_server(
 # ---------- CLI ----------
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Мультисерверный мониторинг/восстановление модемов по net_details.IS_ONLINE + уведомления в Telegram."
+        description="Мониторинг модемов с учетом IS_ONLINE, IS_LOCKED, IS_REBOOTING, IS_ROTATED."
     )
     p.add_argument("--battery-threshold", type=int, default=int(os.getenv("MG_BATTERY_THRESHOLD", "40")),
                    help="Порог уведомления по батарее, % (по умолчанию 40)")
@@ -431,7 +444,7 @@ async def main_async():
                 defaults=defaults,
                 battery_threshold=args.battery_threshold,
                 wait_seconds=args.wait_seconds,
-                doublecheck_seconds=getattr(args, "doublecheck_seconds", DOUBLECHECK_SECONDS),
+                doublecheck_seconds=args.doublecheck_seconds,
             )
         )
         for srv in servers
